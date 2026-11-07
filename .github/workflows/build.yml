@@ -1,0 +1,63 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk/* /usr/local/share/boost || true
+          df -h /
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK / NDK / CMake
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Apply app config (package, name, API ID/hash)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          set -e
+          sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=com.daddy.message/' gradle.properties
+          sed -i 's/"package_name": "org\.telegram\.messenger/"package_name": "com.daddy.message/' TMessagesProj_App/google-services.json
+          sed -i 's|<string name="AppName">[^<]*</string>|<string name="AppName">Daddy Message</string>|' TMessagesProj/src/main/res/values/strings.xml
+          sed -i 's|/data/data/org.telegram.messenger/files|/data/data/com.daddy.message/files|' TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java
+          sed -i 's|details?id=org.telegram.messenger"|details?id=com.daddy.message"|' TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          if [ -n "$TG_API_ID" ] && [ -n "$TG_API_HASH" ]; then
+            sed -i "s|public static int APP_ID = .*;|public static int APP_ID = ${TG_API_ID};|" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+            sed -i "s|public static String APP_HASH = .*;|public static String APP_HASH = \"${TG_API_HASH}\";|" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          fi
+          # Build only arm64 (all modern phones) to keep the build fast
+          sed -i 's/abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/abiFilters "arm64-v8a"/' TMessagesProj_App/build.gradle
+          grep -n "APP_ID =\|APP_HASH =" TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java | sed 's/\(APP_HASH = "\).*/\1***";/'
+
+      - name: Build release APK
+        run: ./gradlew --no-daemon :TMessagesProj_App:assembleAfatRelease -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=1g"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: daddy-message-apk
+          path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
